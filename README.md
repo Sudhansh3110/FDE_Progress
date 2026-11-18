@@ -48,3 +48,8 @@ If a day has no commit, the honest thing is to leave that day blank in the proje
 
 ## Updating the site itself
 When I publish a new version of the site from Claude, I replace `index.html` here and push — GitHub Pages picks it up automatically within a minute or two.
+
+
+## Supabase cloud sync
+
+The site can keep progress across devices using Supabase. Follow [`SUPABASE_SETUP.md`](SUPABASE_SETUP.md), run [`SUPABASE_SETUP.sql`](SUPABASE_SETUP.sql) in your Supabase SQL Editor, and deploy `index.html` plus `supabase-config.js` to GitHub Pages. The public site uses a publishable key and RLS-protected authenticated rows; never commit a Supabase secret/service-role key.

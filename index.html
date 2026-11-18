@@ -381,6 +381,14 @@ table.hist td,table.hist th{border-bottom:1px solid var(--line);padding:6px 8px 
 textarea.io{font:12px/1.4 var(--f-mono);min-height:120px;width:100%;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:8px;padding:8px}
 .syncdot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:6px}
 .syncdot.on{background:var(--ok)}
+.syncauth{display:grid;gap:10px;max-width:440px;margin-top:12px}
+.syncauth p{margin:0;color:var(--muted);font-size:14px}
+.syncauth .syncfields{display:grid;gap:9px}
+.syncauth label{display:grid;gap:5px;font-size:13px;color:var(--muted)}
+.syncauth input{width:100%;max-width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;padding:10px 11px;background:var(--bg);color:var(--ink);font:inherit}
+.syncauth .syncactions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.syncauth small{color:var(--muted);font-size:12px;line-height:1.5}
+
 .hbtns{display:flex;gap:6px;align-items:center;order:5}
 @media (max-width:700px){.hbtns{order:0}.sdetail .col:last-child{order:-1}}
 @media (max-width:980px){.sdetail .col:last-child{order:-1}}
@@ -427,6 +435,8 @@ nav.tabs button{padding:6px 11px}
 <script src="https://cdn.jsdelivr.net/npm/skulpt@1.2.0/dist/skulpt.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/skulpt@1.2.0/dist/skulpt-stdlib.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-config.js"></script>
 <script>
 const PY_SHIMS = {
 "src/lib/heapq.py": `def _up(h, pos):
@@ -7517,37 +7527,132 @@ try{
 if(!S.prefs.start)S.prefs.start=(S.days&&S.days.length?S.days.slice().sort()[0]:today());
 if(S.route&&S.route.v==="projects")S.route={v:"studio"};
 function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
-const SYNC={db:null,uid:null,state:"local",msg:"Saved in this browser only.",timers:{},busy:{},again:{}};
+const SYNC={client:null,uid:null,email:null,state:"local",msg:"Saved in this browser only.",timers:{},busy:{},again:{},ready:false,activeSync:null,activeSyncUid:null};
 function save(...secs){if(!secs.length)secs=["progress"];const n=Date.now();secs.forEach(s=>{S.ts[s]=n;push(s);});saveLocal();}
 function secData(s){const o={};SECTIONS[s].forEach(k=>o[k]=S[k]);return o;}
-function push(s){if(!SYNC.db)return;clearTimeout(SYNC.timers[s]);SYNC.timers[s]=setTimeout(()=>write(s),1500);}
-async function write(s){
-  if(SYNC.busy[s]){SYNC.again[s]=true;return;}
-  SYNC.busy[s]=true;
-  try{await SYNC.db.doc("data/users/"+SYNC.uid+"/"+s).set({updatedAt:S.ts[s],json:JSON.stringify(secData(s))});setSync("on","Synced to your account.");}
-  catch(e){setSync("err","Couldn't sync just now; your progress is still saved in this browser.");}
-  SYNC.busy[s]=false;
-  if(SYNC.again[s]){SYNC.again[s]=false;write(s);}
+function sectionHasData(s){
+  return SECTIONS[s].some(k=>{
+    if(k==="prefs")return false;
+    const v=S[k];
+    if(Array.isArray(v))return v.length>0;
+    if(v&&typeof v==="object")return Object.keys(v).length>0;
+    return !!v;
+  });
 }
-function setSync(st,msg){SYNC.state=st;SYNC.msg=msg;const el=$("#syncTxt");if(el)el.innerHTML=syncHTML();}
+function push(s){if(!SYNC.client||!SYNC.uid)return;clearTimeout(SYNC.timers[s]);SYNC.timers[s]=setTimeout(()=>write(s),1500);}
+async function write(s){
+  if(!SYNC.client||!SYNC.uid)return false;
+  if(SYNC.busy[s]){SYNC.again[s]=true;return true;}
+  SYNC.busy[s]=true;
+  try{
+    const payload={user_id:SYNC.uid,section:s,updated_at:Number(S.ts[s]||Date.now()),data:secData(s)};
+    const {error}=await SYNC.client.from("fde_progress").upsert(payload,{onConflict:"user_id,section"});
+    if(error)throw error;
+    setSync("on","Synced to your account.");
+  }catch(e){
+    setSync("err","Cloud sync failed: "+(e&&e.message?e.message:"check your connection and database setup")+". Your browser copy is safe.");
+    SYNC.busy[s]=false;
+    return false;
+  }
+  SYNC.busy[s]=false;
+  if(SYNC.again[s]){SYNC.again[s]=false;return write(s);}
+  return true;
+}
+function applyRemoteSection(s,data){
+  if(!data||typeof data!=="object")return;
+  SECTIONS[s].forEach(k=>{if(Object.prototype.hasOwnProperty.call(data,k))S[k]=data[k];});
+}
+function setSync(st,msg){SYNC.state=st;SYNC.msg=msg;const el=$("#syncTxt");if(el)el.innerHTML=syncHTML();renderSyncAuth();}
 const syncHTML=()=>`<span class="syncdot ${SYNC.state==="on"?"on":""}"></span>${esc(SYNC.msg)}`;
+function renderSyncAuth(){
+  const el=$("#supabaseAuth");if(!el)return;
+  if(!SYNC.client){el.innerHTML=`<p>${SYNC.state==="err"?esc(SYNC.msg):"Cloud sync is initializing. Refresh the page if this message remains."}</p>`;return;}
+  if(SYNC.uid){
+    el.innerHTML=`<div class="syncauth"><p>Signed in as <b>${esc(SYNC.email||"your account")}</b>. This account's progress is synchronized across your devices.</p><div class="syncactions"><button class="btn" type="button" id="syncSignOut">Sign out</button></div></div>`;
+    const out=$("#syncSignOut");if(out)out.onclick=async()=>{out.disabled=true;const {error}=await SYNC.client.auth.signOut();if(error){out.disabled=false;setSync("err","Sign-out failed: "+error.message);}};
+  }else{
+    el.innerHTML=`<form class="syncauth" id="syncLoginForm"><p>Sign in with your private account to load and save your progress in the cloud. The website itself remains public.</p><div class="syncfields"><label>Email address<input id="syncEmail" type="email" autocomplete="username" required placeholder="you@example.com"></label><label>Password<input id="syncPassword" type="password" autocomplete="current-password" required placeholder="Your password"></label></div><div class="syncactions"><button class="btn primary" id="syncLogin" type="submit">Sign in and sync</button></div><small>This site does not offer public sign-up. Create your one account from Supabase Dashboard → Authentication → Users. Do not use a Supabase secret/service-role key here.</small></form>`;
+    const form=$("#syncLoginForm");
+    if(form)form.onsubmit=async ev=>{
+      ev.preventDefault();const btn=$("#syncLogin"),email=$("#syncEmail").value.trim(),password=$("#syncPassword").value;
+      btn.disabled=true;btn.textContent="Signing in…";setSync("loading","Signing in to your cloud account…");
+      const {error}=await SYNC.client.auth.signInWithPassword({email,password});
+      if(error){setSync("err","Sign-in failed: "+error.message);btn.disabled=false;btn.textContent="Sign in and sync";}
+      else{setSync("loading","Signed in. Restoring your cloud progress…");}
+    };
+  }
+}
+async function syncWithUser(user){
+  if(!user||!SYNC.client)return;
+  if(SYNC.uid===user.id&&SYNC.ready)return;
+  if(SYNC.activeSync&&SYNC.activeSyncUid===user.id)return SYNC.activeSync;
+  SYNC.uid=user.id;SYNC.email=user.email||"";SYNC.ready=false;
+  const task=(async()=>{
+    try{
+      setSync("loading","Checking cloud progress…");
+      const {data:rows,error}=await SYNC.client.from("fde_progress").select("section,updated_at,data").eq("user_id",user.id);
+      if(error)throw error;
+      const remote=Object.fromEntries((rows||[]).map(r=>[r.section,r]));
+      let changed=false;
+      for(const section of Object.keys(SECTIONS)){
+        const row=remote[section];const localTs=Number(S.ts[section]||0);
+        if(row){
+          const remoteTs=Number(row.updated_at||0);
+          if(localTs>remoteTs||(localTs===0&&remoteTs===0&&sectionHasData(section))){clearTimeout(SYNC.timers[section]);const ok=await write(section);if(!ok)throw new Error("Could not upload local "+section+" data. Check the SQL setup and RLS policies.");}
+          else{
+            applyRemoteSection(section,row.data);S.ts[section]=remoteTs;changed=true;
+          }
+        }else if(localTs>0||sectionHasData(section)){
+          if(!S.ts[section])S.ts[section]=Date.now();
+          clearTimeout(SYNC.timers[section]);const ok=await write(section);if(!ok)throw new Error("Could not upload local "+section+" data. Check the SQL setup and RLS policies.");
+        }
+      }
+      if(SYNC.uid!==user.id)return;
+      if(changed){saveLocal();applyPrefs();render();}
+      SYNC.ready=true;setSync("on","Cloud sync is active. Your progress follows this account across devices.");
+    }catch(e){
+      if(SYNC.uid===user.id)setSync("err","Cloud sync setup failed: "+(e&&e.message?e.message:"unknown error")+". Your browser copy is still saved.");
+    }
+  })();
+  SYNC.activeSync=task;SYNC.activeSyncUid=user.id;
+  try{await task;}finally{if(SYNC.activeSync===task){SYNC.activeSync=null;SYNC.activeSyncUid=null;}}
+}
+async function refreshCloud(){
+  if(!SYNC.client||!SYNC.uid||!SYNC.ready)return;
+  try{
+    const uid=SYNC.uid;
+    const {data:rows,error}=await SYNC.client.from("fde_progress").select("section,updated_at,data").eq("user_id",uid);
+    if(error)throw error;
+    let changed=false;
+    for(const row of rows||[]){
+      const section=row.section;if(!SECTIONS[section])continue;
+      const remoteTs=Number(row.updated_at||0),localTs=Number(S.ts[section]||0);
+      if(remoteTs>localTs){applyRemoteSection(section,row.data);S.ts[section]=remoteTs;changed=true;}
+      else if(localTs>remoteTs)write(section);
+    }
+    if(changed&&SYNC.uid===uid){saveLocal();applyPrefs();render();setSync("on","Latest cloud progress loaded.");}
+  }catch(e){setSync("err","Could not refresh cloud progress. Your browser copy is safe.");}
+}
 async function initSync(){
   try{
-    if(!window.claude||typeof window.claude.use!=="function")return;
-    const [db,user]=await Promise.all([window.claude.use("db"),window.claude.use("user")]);
-    if(!db||!user)return;
-    const uid=await user.id();if(!uid)return;
-    SYNC.db=db;SYNC.uid=uid;let changed=false;
-    for(const s of Object.keys(SECTIONS)){
-      const snap=await db.doc("data/users/"+uid+"/"+s).get();
-      const d=snap.exists?snap.data():null;
-      if(d&&(d.updatedAt||0)>(S.ts[s]||0)){try{Object.assign(S,JSON.parse(d.json));S.ts[s]=d.updatedAt;changed=true;}catch(e){}}
-      else if((S.ts[s]||0)>((d&&d.updatedAt)||0))write(s);
-    }
-    setSync("on","Synced to your account. Progress follows you across devices.");
-    if(changed){saveLocal();applyPrefs();render();}
-  }catch(e){setSync("err","Account sync unavailable; progress is saved in this browser.");}
+    const cfg=window.FDE_SUPABASE_CONFIG||{};
+    if(!window.supabase||typeof window.supabase.createClient!=="function")throw new Error("Supabase client library did not load. Check your connection or refresh.");
+    if(!cfg.url||!cfg.publishableKey)throw new Error("Supabase project URL or publishable key is missing from supabase-config.js.");
+    SYNC.client=window.supabase.createClient(cfg.url,cfg.publishableKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+    SYNC.client.auth.onAuthStateChange((event,session)=>{
+      setTimeout(()=>{
+        if(session&&session.user)syncWithUser(session.user);
+        else{SYNC.uid=null;SYNC.email=null;SYNC.ready=false;setSync("local","Signed out. Progress is saved in this browser until you sign in again.");}
+      },0);
+    });
+    const {data,error}=await SYNC.client.auth.getSession();
+    if(error)throw error;
+    if(data&&data.session&&data.session.user)await syncWithUser(data.session.user);
+    else setSync("local","Saved in this browser only. Open Settings → Sync and sign in to sync across devices.");
+  }catch(e){setSync("err","Cloud sync unavailable: "+(e&&e.message?e.message:"check configuration")+". Local saving still works.");}
 }
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")refreshCloud();});
+window.addEventListener("online",()=>refreshCloud());
 
 // ---------- progress helpers ----------
 function markActive(){const t=today();if(!S.days.includes(t)){S.days.push(t);}}
@@ -8212,14 +8317,15 @@ function renderSettings(){
       ${seg("pace",[[45,"45 days"],[90,"90 days"],[135,"135 days"]],p.pace)}
       <label class="fieldl" style="max-width:240px">Start date<input type="date" id="startD" value="${esc(p.start)}"></label></section>
     <section class="set"><h3>Focus mode</h3><p>Hides the navigation, meters and footer, and narrows the reading column. Exit from the top bar. Pairs well with a Studio focus session.</p><div><button class="btn primary" type="button" id="fOn">Turn on focus mode</button></div></section>
-    <section class="set"><h3>Sync</h3><p id="syncTxt">${syncHTML()}</p></section>
+    <section class="set"><h3>Cloud sync</h3><p id="syncTxt">${syncHTML()}</p><div id="supabaseAuth"></div></section>
     <section class="set"><h3>Export my code, by day</h3><p>Downloads a .zip with one folder per day you solved at least one problem (day01, day02, …, in the order you actually worked — not calendar dates), each file named after the problem, with exactly the code you last saved for it. Made for pushing straight into your own GitHub repo as your daily commit history.</p>
       <div class="actions"><button class="btn primary" type="button" id="expZip">Download code-by-day .zip</button><span class="muted" id="expMsg" style="font-size:14px"></span></div></section>
     <section class="set"><h3>Backup</h3><p>Copy everything (progress, code, notes, journals) as text, or paste a backup to restore it.</p>
       <div class="actions"><button class="btn" type="button" id="exp">Show my backup</button><button class="btn" type="button" id="imp">Restore from pasted text</button></div>
       <textarea class="io" id="io" spellcheck="false" placeholder="Backup text appears here, or paste one to restore."></textarea><span class="muted" id="ioMsg" style="font-size:14px"></span></section>
-    <section class="set"><h3>Reset</h3><p>Erase all progress, answers, code and notes${SYNC.db?", here and in your account":""}.</p><div id="resetArea"><button class="btn" type="button" id="resetBtn">Reset everything</button></div></section>
+    <section class="set"><h3>Reset</h3><p>Erase all progress, answers, code and notes${SYNC.uid?", here and in your cloud account":""}.</p><div id="resetArea"><button class="btn" type="button" id="resetBtn">Reset everything</button></div></section>
   </div>`;
+  renderSyncAuth();
   $$("[data-set]").forEach(b=>b.onclick=()=>{const k=b.dataset.set;let v=b.dataset.v;if(k==="pace")v=+v;S.prefs[k]=v;applyPrefs();save();renderSettings();});
   $("#startD").onchange=e=>{if(e.target.value){S.prefs.start=e.target.value;save();}};
   $("#fOn").onclick=()=>setFocus(true);
